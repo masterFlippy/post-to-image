@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  OpenAIApiKey:
+    Type: String
+    Description: "OpenAI API Key"
+
+Resources:
+  ImageUploadFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageUploadPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-image-upload-bucket/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - events:DescribeEventBus
+                  - events:GetEvents
+                  - events:ListRules
+                  - events:ListTargetsByRule
+                  - events:PutEvents
+                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PostToImageEventBus}"
+
+  ImageUploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-image-upload-bucket"
+
+  ImageUploadBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ImageUploadBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ImageUploadFunctionRole.Arn
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${AWS::StackName}-image-upload-bucket/*"
+
+  PostToImageEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: PostToImageEventBus
+
+  PromptPreparationAPIFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2023
+      CodeUri: prepare-prompt/
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref PostToImageEventBus
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /generate
+            Method: post
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - events:PutEvents
+              Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PostToImageEventBus}"
+
+  ImageGenerationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2023
+      CodeUri: generate-image/
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref PostToImageEventBus
+          OPENAI_API_KEY: !Ref OpenAIApiKey
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - events:DescribeEventBus
+                - events:GetEvents
+                - events:ListRules
+                - events:ListTargetsByRule
+                - events:PutEvents
+              Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PostToImageEventBus}"
+
+  ImageUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2023
+      CodeUri: upload-image/
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageUploadBucket
+      Role: !GetAtt ImageUploadFunctionRole.Arn
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+  ImageGenerationEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref PostToImageEventBus
+      EventPattern:
+        source:
+          - "prepare_prompt_function"
+        detail-type:
+          - "promptSubmitted"
+      Targets:
+        - Arn: !GetAtt ImageGenerationFunction.Arn
+          Id: "ImageGenerationFunctionTarget"
+      State: "ENABLED"
+
+  ImageUploadEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref PostToImageEventBus
+      EventPattern:
+        source:
+          - "generate_image_function"
+        detail-type:
+          - "imageGenerated"
+      Targets:
+        - Arn: !GetAtt ImageUploadFunction.Arn
+          Id: "ImageUploadFunctionTarget"
+      State: "ENABLED"
+
+  ImageGenerationLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ImageGenerationFunction.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt ImageGenerationEventBridgeRule.Arn
+
+  ImageUploadLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ImageUploadFunction.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt ImageUploadEventBridgeRule.Arn
+
+Outputs:
+  ImageUploadBucketName:
+    Description: "Name of the S3 bucket"
+    Value: !Ref ImageUploadBucket
