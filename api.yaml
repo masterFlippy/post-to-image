@@ -1,0 +1,63 @@
+openapi: "3.0.1"
+info:
+  title: "HTTP API"
+paths:
+  /get-image:
+    get:
+      parameters:
+        - name: s3Key
+          in: query
+          description: "Path to image in S3 bucket"
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: "Successful response"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    description: "URL of the retrieved image"
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetImageFunction.Arn}/invocations
+        credentials:
+          Fn::GetAtt: [HttpApiLambdaRole, Arn]
+        payloadFormatVersion: "1.0"
+        passthroughBehavior: "when_no_match"
+  /generate-image:
+    post:
+      responses:
+        default:
+          description: "API to EventBridge"
+      x-amazon-apigateway-integration:
+        integrationSubtype: "EventBridge-PutEvents"
+        credentials:
+          Fn::GetAtt: [HttpApiEvenbridgeRole, Arn]
+        requestParameters:
+          Detail: "$request.body"
+          DetailType: PreparePrompt
+          Source: api-gateway
+          EventBusName:
+            Fn::GetAtt: [PostToImageEventBus, Name]
+        payloadFormatVersion: "1.0"
+        type: "aws_proxy"
+        connectionType: "INTERNET"
+x-amazon-apigateway-importexport-version: "1.0"
+x-amazon-apigateway-cors:
+  allowOrigins:
+    - "*"
+  allowHeaders:
+    - "*"
+  allowMethods:
+    - "PUT"
+    - "POST"
+    - "DELETE"
+    - "HEAD"
+    - "GET"

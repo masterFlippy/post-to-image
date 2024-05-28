@@ -1,9 +1,9 @@
-.PHONY: build-ImageGenerationFunction package-ImageGenerationFunction
+.PHONY: build-GetImageFunction package-GetImageFunction
 
-build-ImageGenerationFunction:
+build-GetImageFunction:
 	GOOS=linux GOARCH=amd64 go build -o bootstrap main.go
 	chmod +x bootstrap
 	cp bootstrap $(ARTIFACTS_DIR)/
 
-package-ImageGenerationFunction:
+package-GetImageFunction:
 	cd $(ARTIFACTS_DIR) && zip -r function.zip bootstrap

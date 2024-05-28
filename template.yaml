@@ -7,45 +7,85 @@ Parameters:
     Description: "OpenAI API Key"
 
 Resources:
-  ImageUploadFunctionRole:
-    Type: AWS::IAM::Role
+  PostToImageEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: PostToImageEventBus
+
+  PostToImageApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefinitionBody:
+        "Fn::Transform":
+          Name: "AWS::Include"
+          Parameters:
+            Location: "./api.yaml"
+
+  HttpApiEvenbridgeRole:
+    Type: "AWS::IAM::Role"
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
+          - Effect: "Allow"
             Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
+              Service: "apigateway.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
       Policies:
-        - PolicyName: ImageUploadPolicy
+        - PolicyName: ApiDirectWriteEventBridge
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              Action:
+                - events:PutEvents
+              Effect: Allow
+              Resource:
+                - !GetAtt PostToImageEventBus.Arn
+
+  HttpApiLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "apigateway.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "LambdaExecutionPolicy"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-image-upload-bucket/*"
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "*"
-              - Effect: Allow
-                Action:
-                  - events:DescribeEventBus
-                  - events:GetEvents
-                  - events:ListRules
-                  - events:ListTargetsByRule
-                  - events:PutEvents
-                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PostToImageEventBus}"
+                  - "lambda:InvokeFunction"
+                Resource: !GetAtt GetImageFunction.Arn
 
   ImageUploadBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${AWS::StackName}-image-upload-bucket"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+              - GET
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders: []
 
   ImageUploadBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -55,17 +95,11 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Principal:
-              AWS: !GetAtt ImageUploadFunctionRole.Arn
+            Principal: "*"
             Action:
               - s3:PutObject
               - s3:GetObject
             Resource: !Sub "arn:aws:s3:::${AWS::StackName}-image-upload-bucket/*"
-
-  PostToImageEventBus:
-    Type: AWS::Events::EventBus
-    Properties:
-      Name: PostToImageEventBus
 
   PromptPreparationAPIFunction:
     Type: AWS::Serverless::Function
@@ -73,46 +107,60 @@ Resources:
       Handler: bootstrap
       Runtime: provided.al2023
       CodeUri: prepare-prompt/
-      Environment:
-        Variables:
-          EVENT_BUS_NAME: !Ref PostToImageEventBus
-      Events:
-        Api:
-          Type: Api
-          Properties:
-            Path: /generate
-            Method: post
+      Timeout: 60
       Policies:
         - AWSLambdaBasicExecutionRole
         - Version: "2012-10-17"
           Statement:
-            - Effect: Allow
+            - Effect: "Allow"
               Action:
-                - events:PutEvents
-              Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PostToImageEventBus}"
+                - comprehend:DetectSentiment
+              Resource: "*"
 
-  ImageGenerationFunction:
+  DalleImageGenerationFunction:
     Type: AWS::Serverless::Function
     Properties:
       Handler: bootstrap
       Runtime: provided.al2023
-      CodeUri: generate-image/
+      CodeUri: generate-image-dalle/
+      Timeout: 30
       Environment:
         Variables:
-          EVENT_BUS_NAME: !Ref PostToImageEventBus
           OPENAI_API_KEY: !Ref OpenAIApiKey
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+  BedrockImageGenerationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2023
+      CodeUri: generate-image-bedrock/
+      Timeout: 30
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageUploadBucket
       Policies:
         - AWSLambdaBasicExecutionRole
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
-                - events:DescribeEventBus
-                - events:GetEvents
-                - events:ListRules
-                - events:ListTargetsByRule
-                - events:PutEvents
-              Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PostToImageEventBus}"
+                - "bedrock:InvokeModel"
+              Resource: "*"
+
+  GetImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2023
+      CodeUri: get-image/
+      Timeout: 30
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImageUploadBucket
+      Policies:
+        - AWSLambdaBasicExecutionRole
 
   ImageUploadFunction:
     Type: AWS::Serverless::Function
@@ -120,56 +168,112 @@ Resources:
       Handler: bootstrap
       Runtime: provided.al2023
       CodeUri: upload-image/
+      Timeout: 30
       Environment:
         Variables:
           BUCKET_NAME: !Ref ImageUploadBucket
-      Role: !GetAtt ImageUploadFunctionRole.Arn
+          REGION: !Ref AWS::Region
       Policies:
         - AWSLambdaBasicExecutionRole
 
-  ImageGenerationEventBridgeRule:
+  PostToImageStateMachine:
+    Type: "AWS::Serverless::StateMachine"
+    Properties:
+      Definition:
+        StartAt: PromptPreparation
+        States:
+          PromptPreparation:
+            Type: Task
+            Resource: !GetAtt PromptPreparationAPIFunction.Arn
+            Next: CheckBedRock
+          CheckBedRock:
+            Type: Choice
+            Choices:
+              - Variable: "$.bedrock"
+                BooleanEquals: true
+                Next: BedrockImageGeneration
+            Default: DalleImageGeneration
+          BedrockImageGeneration:
+            Type: Task
+            Resource: !GetAtt BedrockImageGenerationFunction.Arn
+            End: true
+          DalleImageGeneration:
+            Type: Task
+            Resource: !GetAtt DalleImageGenerationFunction.Arn
+            Next: ImageUpload
+          ImageUpload:
+            Type: Task
+            Resource: !GetAtt ImageUploadFunction.Arn
+            End: true
+      Role: !GetAtt PostToImageStateMachineRole.Arn
+
+  PostToImageStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "StateMachineExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource:
+                  - !GetAtt PromptPreparationAPIFunction.Arn
+                  - !GetAtt DalleImageGenerationFunction.Arn
+                  - !GetAtt ImageUploadFunction.Arn
+                  - !GetAtt BedrockImageGenerationFunction.Arn
+              - Effect: Allow
+                Action:
+                  - "states:StartExecution"
+                  - "states:DescribeExecution"
+                  - "states:StopExecution"
+                Resource: "*"
+
+  StateMachineEventBridgeRule:
     Type: AWS::Events::Rule
     Properties:
       EventBusName: !Ref PostToImageEventBus
       EventPattern:
         source:
-          - "prepare_prompt_function"
+          - "api-gateway"
         detail-type:
-          - "promptSubmitted"
+          - "PreparePrompt"
       Targets:
-        - Arn: !GetAtt ImageGenerationFunction.Arn
-          Id: "ImageGenerationFunctionTarget"
+        - Arn: !GetAtt PostToImageStateMachine.Arn
+          Id: "PostToImageStateMachineTarget"
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
       State: "ENABLED"
 
-  ImageUploadEventBridgeRule:
-    Type: AWS::Events::Rule
+  EventBridgeExecutionRole:
+    Type: "AWS::IAM::Role"
     Properties:
-      EventBusName: !Ref PostToImageEventBus
-      EventPattern:
-        source:
-          - "generate_image_function"
-        detail-type:
-          - "imageGenerated"
-      Targets:
-        - Arn: !GetAtt ImageUploadFunction.Arn
-          Id: "ImageUploadFunctionTarget"
-      State: "ENABLED"
-
-  ImageGenerationLambdaInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt ImageGenerationFunction.Arn
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn: !GetAtt ImageGenerationEventBridgeRule.Arn
-
-  ImageUploadLambdaInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt ImageUploadFunction.Arn
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn: !GetAtt ImageUploadEventBridgeRule.Arn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "EventBridgeStepFunctionsExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "states:StartExecution"
+                Resource: !GetAtt PostToImageStateMachine.Arn
 
 Outputs:
   ImageUploadBucketName:
