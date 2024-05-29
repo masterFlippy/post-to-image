@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
@@ -57,13 +56,15 @@ func getTopSentiment(sentimentScores *comprehend.SentimentScore) string {
 	return topSentiment
 }
 
+
 func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
+	text := event.Detail.Text
 	svc := comprehend.New(session.Must(session.NewSession(&aws.Config{
 		Region: aws.String("eu-west-1"),
 	})))
-	log.Println("Detecting sentiment for text:", event.Detail.Text)
+
 	sentimentParams := &comprehend.DetectSentimentInput{
-		Text:         aws.String(event.Detail.Text),
+		Text:         aws.String(text),
 		LanguageCode: aws.String("en"),
 	}
 
@@ -74,7 +75,14 @@ func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
 
 	topSentiment := getTopSentiment(sentimentResult.SentimentScore)
 
-	prompt := fmt.Sprintf("Generate a %s image based on the following text: %s", topSentiment, event.Detail.Text)
+	// Limit the text to 400 characters to be sure not to hit the roof on the bedrock side. temp fix, next step is to use a summary function to get the most important parts of the text
+	if(len(text) > 400) {
+		text = text[:500]
+	}
+
+	prompt := fmt.Sprintf("Generate a %s image based on the following text: %s", topSentiment, text)
+
+
 
 	outputEvent := OutputEvent{Prompt: prompt, S3Key: event.Detail.S3Key, Bedrock: event.Detail.Bedrock}
 
