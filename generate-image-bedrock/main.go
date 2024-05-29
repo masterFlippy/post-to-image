@@ -28,6 +28,7 @@ type OutputEvent struct {
 	Url   string `json:"url"`
 }
 
+// Titan specific types for requests towards bedrock
 type TitanInputTextToImageInput struct {
 	TaskType              string                                                `json:"taskType"`
 	ImageGenerationConfig TitanInputTextToImageConfig `json:"imageGenerationConfig"`
@@ -52,6 +53,7 @@ type TitanInputTextToImageOutput struct {
 	Error  string   `json:"error"`
 }
 
+// Function to decode base64 image
 func decodeImage(base64Image string) ([]byte, error) {
 	decoded, err := base64.StdEncoding.DecodeString(base64Image)
 	if err != nil {
@@ -60,20 +62,24 @@ func decodeImage(base64Image string) ([]byte, error) {
 	return decoded, nil
 }
 
-func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
+func handler(ctx context.Context, event InputEvent)  error {
+	// Grabbing the name of the bucket from the environment variable
 	bucketName := os.Getenv("BUCKET_NAME")
 	if bucketName == "" {
 		log.Println("Error: BUCKET_NAME environment variable is not set")
-		return OutputEvent{}, fmt.Errorf("missing BUCKET_NAME")
+		return fmt.Errorf("missing BUCKET_NAME")
 	}
 	
+	// Preparing config for the runtime and forcing us east 1 since its not available in eu north 1
 	cfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion("us-east-1"))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
+	// Creating the runtime for bedrock
 	runtime := bedrockruntime.NewFromConfig(cfg)
 
+	// Preparing the request payload for bedrock
 	payload := TitanInputTextToImageInput{
 		TaskType: "TEXT_IMAGE",
 		TextToImageParams: TitanInputTextToImageParams{
@@ -90,7 +96,7 @@ func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
 
 	payloadString, err := json.Marshal(payload)
 	if err != nil {
-		log.Fatalf("unable to marshal body: %v", err)
+		return fmt.Errorf("unable to marshal body: %v", err)
 	}
 
 
@@ -98,6 +104,7 @@ func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
 	contentType := "application/json"
 	model := "amazon.titan-image-generator-v1"
 
+	// Sending request to bedrock
 	resp, err := runtime.InvokeModel(context.TODO(), &bedrockruntime.
 	InvokeModelInput{
 		Accept:      &accept,
@@ -107,28 +114,29 @@ func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
 	})
 
 	if err != nil {
-		log.Fatalf("error from Bedrock, %v", err)
+		return fmt.Errorf("error from Bedrock, %v", err)
 	}
 
 	var output TitanInputTextToImageOutput
 
 	err = json.Unmarshal(resp.Body, &output)
 	if err != nil {
-		log.Fatalf("unable to unmarshal response from Bedrock: %v", err)
+		return fmt.Errorf("unable to unmarshal response from Bedrock: %v", err)
 	}
-
+  	// Decoding base64 to be able to upload image to S3
 	decoded, err := decodeImage(output.Images[0])
 	if err != nil {
-		log.Fatalf("unable to decode image: %v", err)
+		return fmt.Errorf("unable to decode image: %v", err)
 	}
 
-
+  	// Creating a session for S3
 	sesh := session.Must(session.NewSession())
 
 	s3Client := s3.New(sesh)
 
 	objectKey := event.S3Key
-
+	
+	// Uploading image to S3
 	_, err = s3Client.PutObject(&s3.PutObjectInput{
 		Bucket:      aws.String(bucketName),
 		Key:         aws.String(objectKey),
@@ -137,12 +145,12 @@ func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
 	})
 	if err != nil {
 		log.Println("Error uploading image to S3:", err)
-		return OutputEvent{}, err
+		return err
 	}
 
 	log.Println("Successfully uploaded image to S3:", objectKey)
 
-	return OutputEvent{}, nil
+	return  nil
 }
 
 func main() {
