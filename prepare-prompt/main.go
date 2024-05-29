@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
@@ -68,22 +70,32 @@ func handler(ctx context.Context, event InputEvent) (OutputEvent, error) {
 		LanguageCode: aws.String("en"),
 	}
 
+	keyPhraseParams := &comprehend.DetectKeyPhrasesInput{
+		Text:         aws.String(text),
+		LanguageCode: aws.String("en"),
+	}
+
 	sentimentResult, err := svc.DetectSentiment(sentimentParams)
 	if err != nil {
 		return OutputEvent{}, fmt.Errorf("failed to detect sentiment: %w", err)
 	}
 
-	topSentiment := getTopSentiment(sentimentResult.SentimentScore)
-
-	// Limit the text to 400 characters to be sure not to hit the roof on the bedrock side. temp fix, next step is to use a summary function to get the most important parts of the text
-	if(len(text) > 400) {
-		text = text[:500]
+	keyPhraseResult, err := svc.DetectKeyPhrases(keyPhraseParams)
+	if err != nil {
+		return OutputEvent{}, fmt.Errorf("failed to process text: %w", err)
 	}
 
-	prompt := fmt.Sprintf("Generate a %s image based on the following text: %s", topSentiment, text)
+	var keyPhrases []string
+	topSentiment := getTopSentiment(sentimentResult.SentimentScore)
+	keyPhrases = append(keyPhrases, topSentiment)
+	for _, phrase := range keyPhraseResult.KeyPhrases {
+		keyPhrases = append(keyPhrases, *phrase.Text)
+	}
 
+	summary := strings.Join(keyPhrases, " ")
 
-
+	prompt := fmt.Sprintf("Generate a image based on the following key words: %s",  summary)
+	log.Printf("Prompt: %s", prompt)
 	outputEvent := OutputEvent{Prompt: prompt, S3Key: event.Detail.S3Key, Bedrock: event.Detail.Bedrock}
 
 	return outputEvent, nil

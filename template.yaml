@@ -115,6 +115,7 @@ Resources:
             - Effect: "Allow"
               Action:
                 - comprehend:DetectSentiment
+                - comprehend:DetectKeyPhrases
               Resource: "*"
 
   DalleImageGenerationFunction:
